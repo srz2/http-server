@@ -1,0 +1,15 @@
+HTTP/1.1 200 OK
+Content-Type: text/html
+text/html
+
+<!DOCTYPE html>
+<html>
+<head>
+<title>
+</title>
+</head>
+<body>
+<h1>
+Steven's First Http Server!</h1></body>
+</html>
+
