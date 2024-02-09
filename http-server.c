@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <netinet/ip.h>
@@ -9,7 +11,9 @@
 #include <signal.h>
 
 #define PORT 3000
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 1048576
+
+static char * indexPageName = "index.html";
 
 typedef int bool;
 #define false 0
@@ -21,7 +25,10 @@ bool getIsRunning();
 void setIsRunning(bool newValue);
 
 void* handle_new_client(void * args);
-void build_http_response(char * response, size_t * size);
+void build_http_response(const char * buffer, const char * response, size_t * size);
+char* decodeMethod(const char * buffer);
+char* decodeRoute(const char * buffer);
+char* getMimeType(const char * route);
 
 void programTerminatedByUser();
 
@@ -129,13 +136,14 @@ void* handle_new_client(void * args)
         return (void*)NULL;
     }
 
-    printf("Recieved %ld bytes\n", bytes_received);
+    printf("Received %ld bytes\n", bytes_received);
     printf("=================\n%s============\n", buffer);
 
     // Build HTTP response
     char *response = (char*)malloc(BUFFER_SIZE * sizeof(char));
     size_t responseLength;
-    build_http_response(response, &responseLength);
+
+    build_http_response(buffer, response, &responseLength);
     
     printf("Sending %ld bytes:\n%s\n", responseLength, response);
 
@@ -148,33 +156,164 @@ void* handle_new_client(void * args)
     free(response);
 }
 
-void build_http_response(char * response, size_t * size)
+void build_http_response(const char * buffer, const char * response, size_t * size)
 {
-    // Html Reponse
-    char * html = ""
-    "<!DOCTYPE html>\n"
-    "<html>\n"
-    "<head>\n"
-    "<title>\n"
-    "This is from Steven's Server"
-    "</title>\n"
-    "</head>\n"
-    "<body>\n"
-    "<h1>\n"
-    "Steven's First Http Server!</h1>"
-    "</body>\n"
-    "</html>\n";
+    // Determine method
+    char * method = decodeMethod(buffer);
+    printf("METHOD: %s\n", method);
+    if (strcmp(method, "GET") != 0)
+    {
+        // Create Not Implemented method
+        snprintf((void *)response, BUFFER_SIZE,
+            "HTTP/1.1 501 Not Implemented\n"
+            "Content-Type: text/plaintext\n"
+            "\n"
+            "This method was not implemented in the Http-Server");
+        *size = strlen(response);
+        return;
+    }
+
+    char * route = decodeRoute(buffer);
+
+    printf("Locating \"%s\"\n", route);
+    // Determine if file exists
+    FILE * file = fopen(route, "r");
+    if (file == NULL)
+    {
+        // Create Not Implemented method
+        snprintf((void *)response, BUFFER_SIZE,
+            "HTTP/1.1 404 File Not Found\n"
+            "Content-Type: text/plaintext\n"
+            "\n"
+            "The file was not found");
+        *size = strlen(response);
+        return;
+    }
 
     // Build Http Header
-    // char *header = (char *)malloc(BUFFER_SIZE * sizeof(char));
+    const char * mimeType = getMimeType(route);
     snprintf((void *)response, BUFFER_SIZE,
-             "HTTP/1.1 200 OK\n"
-             "Content-Type: %s\n"
-             "\n"
-             "%s\n",
-             "text/html", html );
-    
+        "HTTP/1.1 200 OK\n"
+        "Content-Type: %s\n"
+        "\n", mimeType);
     *size = strlen(response);
+
+    // Get file for response body
+    int fd = fileno(file);
+    struct stat fileStats;
+    fstat(fd, &fileStats);
+    off_t fileSize = fileStats.st_size;
+
+    ssize_t readSize = read(fd, (void*)response + (*size), fileSize);
+    if (readSize != fileSize)
+    {
+        perror("Didn't read the whole file\n");
+    }
+    *size += readSize;
+}
+
+char* decodeMethod(const char * buffer)
+{
+    int c = 0;
+    for (c = 0; c < BUFFER_SIZE; c++)
+    {
+        if (buffer[c] == ' ')
+        {
+            c++;
+            break;
+        }
+    }
+
+    char * method = (char*)malloc(sizeof(char) * c);
+    snprintf(method, c, "%s", buffer);
+    return method;
+}
+
+char* decodeRoute(const char * buffer)
+{
+    int start = -1;
+    int end = -1;
+    int c = 0;
+
+    for(c = 0; c < BUFFER_SIZE; c++)
+    {
+        if (start == -1 && buffer[c] == '/')
+        {
+            start = c;
+            continue;
+        }
+
+        if (start >= 0 && buffer[c] == ' ')
+        {
+            end = c;
+            break;
+        }
+    }
+    start++;
+
+    if (end == -1)
+    {
+        return "pages/index.html";
+    }
+
+    int size = end - start;
+    char * route = (char*) malloc(sizeof(char) * size + 1 + strlen("pages/"));
+    memset(route, '\0', size + 1 + strlen("pages/"));
+    strcpy(route, "pages/");
+    memcpy(route + 6, buffer + start, size);
+
+    printf("Obtained Route: (start=%d, end=%d, size=%d) %s\n", start, end, size, route);
+
+    int routeSize = strlen(route);
+
+    // If ending with slash
+    if (route[routeSize - 1] == '\\' || route [routeSize -1] == '/')
+    {
+        printf("HERE\n");
+        route = realloc(route, routeSize + strlen(indexPageName) + 1);
+        if (route == NULL)
+        {
+            perror("Failed to resize\n");
+        }
+        else
+        {
+            strcat(route, indexPageName);
+        }
+    }
+
+    return route;
+}
+
+char* getMimeType(const char * route)
+{
+    char * found = strchr(route, '.');
+    if (found == NULL)
+    {
+        return "text/plaintext";
+    }
+    found += 1;
+
+    printf("Found Mime: \"%s\"\n", found);
+    if (strcmp(found, "html") == 0)
+    {
+        return "text/html";
+    }
+    else if (strcmp(found, "css") == 0)
+    {
+        return "text/stylesheet";
+    }
+    else if (strcmp(found, "jpg") == 0 || strcmp(found, "jpeg") == 0)
+    {
+        return "image/jpeg";
+    }
+    else if (strcmp(found, "png") == 0)
+    {
+        return "image/png";
+    }
+    else
+    {
+        return "text/plaintext";
+    }
 }
 
 bool getIsRunning()
